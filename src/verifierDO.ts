@@ -48,11 +48,14 @@ export class VerifeiDO {
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
-    this.dnsService = new DnsService();
+    
+    const timeout = parseInt(env.SMTP_TIMEOUT_MS, 10) || 5000;
+    
+    this.dnsService = new DnsService(timeout);
     this.smtpService = new SmtpService(
       env.SMTP_HELO_DOMAIN,
       env.PROBE_EMAIL,
-      parseInt(env.SMTP_TIMEOUT_MS, 10),
+      timeout,
       parseInt(env.MAX_CONCURRENCY_PER_MX, 10)
     );
     this.scoreService = new ScoreService();

@@ -102,26 +102,31 @@ export class SmtpService {
    */
   private async connectAndVerify(server: string, email: string): Promise<SmtpResult> {
     // Using Cloudflare Workers Sockets API
+    let socket: any = null;
+    let timeoutId: NodeJS.Timeout | null = null;
+    
     try {
-      const socket = new (globalThis as any).Socket({
+      socket = new (globalThis as any).Socket({
         hostname: server,
         port: 25,
         ssl: false, // Start with non-SSL, we'll try STARTTLS later
       });
       
       // Set a timeout
-      const timeoutId = setTimeout(() => {
-        try {
-          socket.close();
-        } catch (e) {
-          // Ignore errors on close
+      timeoutId = setTimeout(() => {
+        if (socket) {
+          try {
+            socket.close();
+            socket = null;
+          } catch (e) {
+            // Ignore errors on close
+          }
         }
       }, this.timeoutMs);
       
       // Connect to the server
       const connected = await socket.connect();
       if (!connected) {
-        clearTimeout(timeoutId);
         return {
           success: false,
           isCatchAll: null,
@@ -132,8 +137,6 @@ export class SmtpService {
       // Wait for the server's greeting
       const greeting = await this.readResponse(socket);
       if (!this.isPositiveResponse(greeting)) {
-        clearTimeout(timeoutId);
-        socket.close();
         return {
           success: false,
           isCatchAll: null,
@@ -145,8 +148,6 @@ export class SmtpService {
       await socket.write(`HELO ${this.heloHost}\r\n`);
       const heloResponse = await this.readResponse(socket);
       if (!this.isPositiveResponse(heloResponse)) {
-        clearTimeout(timeoutId);
-        socket.close();
         return {
           success: false,
           isCatchAll: null,
@@ -176,8 +177,6 @@ export class SmtpService {
       await socket.write(`MAIL FROM:<${this.probeEmail}>\r\n`);
       const mailFromResponse = await this.readResponse(socket);
       if (!this.isPositiveResponse(mailFromResponse)) {
-        clearTimeout(timeoutId);
-        socket.close();
         return {
           success: false,
           isCatchAll: null,
@@ -188,16 +187,6 @@ export class SmtpService {
       // Send RCPT TO (this is the actual test)
       await socket.write(`RCPT TO:<${email}>\r\n`);
       const rcptToResponse = await this.readResponse(socket);
-      
-      // Clean up
-      try {
-        await socket.write("QUIT\r\n");
-      } catch (e) {
-        // Ignore errors on QUIT
-      }
-      
-      clearTimeout(timeoutId);
-      socket.close();
       
       // Determine success based on the RCPT TO response
       return {
@@ -211,6 +200,26 @@ export class SmtpService {
         isCatchAll: null,
         error: `SMTP error: ${error instanceof Error ? error.message : String(error)}`
       };
+    } finally {
+      // Always clean up
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      
+      if (socket) {
+        try {
+          // Send QUIT command if possible
+          await socket.write("QUIT\r\n").catch(() => {});
+        } catch (e) {
+          // Ignore errors on QUIT
+        }
+        
+        try {
+          socket.close();
+        } catch (e) {
+          // Ignore errors on close
+        }
+      }
     }
   }
   
@@ -220,7 +229,27 @@ export class SmtpService {
    * @returns Promise with parsed SMTP response
    */
   private async readResponse(socket: any): Promise<SmtpResponse> {
-    const buffer = await socket.read();
+    // Add a timeout to prevent hanging forever
+    const readPromise = socket.read();
+    
+    // Create a timeout promise that rejects after the timeout period
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('Socket read timed out'));
+      }, this.timeoutMs);
+    });
+    
+    // Race the read promise against the timeout
+    let buffer;
+    try {
+      buffer = await Promise.race([readPromise, timeoutPromise]);
+    } catch (error) {
+      return {
+        code: 0,
+        message: `Read timeout: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+    
     const responseText = new TextDecoder().decode(buffer);
     
     // Parse the response code and message

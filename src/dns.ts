@@ -16,6 +16,45 @@ interface DnsResponse {
  */
 export class DnsService {
   private readonly dnsApiBase = 'https://cloudflare-dns.com/dns-query';
+  private readonly timeoutMs: number;
+  
+  /**
+   * Create a new DNS service instance
+   * @param timeoutMs - Timeout for DNS queries in milliseconds
+   */
+  constructor(timeoutMs = 5000) {
+    this.timeoutMs = timeoutMs;
+  }
+  
+  /**
+   * Fetch with timeout
+   * @param url - URL to fetch
+   * @param options - Fetch options
+   * @returns Promise with the fetch response
+   */
+  private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    
+    const timeoutId = setTimeout(() => {
+      controller.abort();
+    }, this.timeoutMs);
+    
+    try {
+      const response = await fetch(url, { ...options, signal });
+      clearTimeout(timeoutId);
+      return response;
+    } catch (error) {
+      clearTimeout(timeoutId);
+      
+      // Check if it's an abortion error
+      if (error instanceof Error && error.name === 'AbortError') {
+        throw new Error(`Request timeout after ${this.timeoutMs}ms`);
+      }
+      
+      throw error;
+    }
+  }
   
   /**
    * Perform DNS lookups for a domain
@@ -23,16 +62,26 @@ export class DnsService {
    * @returns Promise with DNS lookup results
    */
   async lookup(domain: string): Promise<DnsResult> {
-    const [mxRecords, hasA] = await Promise.all([
-      this.lookupMX(domain),
-      this.hasARecord(domain)
-    ]);
-    
-    return {
-      hasMx: mxRecords.length > 0,
-      records: mxRecords,
-      hasA
-    };
+    try {
+      const [mxRecords, hasA] = await Promise.all([
+        this.lookupMX(domain),
+        this.hasARecord(domain)
+      ]);
+      
+      return {
+        hasMx: mxRecords.length > 0,
+        records: mxRecords,
+        hasA
+      };
+    } catch (error) {
+      console.error(`DNS lookup error for ${domain}:`, error);
+      // Return empty result on error
+      return {
+        hasMx: false,
+        records: [],
+        hasA: false
+      };
+    }
   }
   
   /**
@@ -42,11 +91,14 @@ export class DnsService {
    */
   private async lookupMX(domain: string): Promise<MXRecord[]> {
     try {
-      const response = await fetch(`${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=MX`, {
-        headers: {
-          'Accept': 'application/dns-json'
+      const response = await this.fetchWithTimeout(
+        `${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=MX`, 
+        {
+          headers: {
+            'Accept': 'application/dns-json'
+          }
         }
-      });
+      );
       
       if (!response.ok) {
         throw new Error(`DNS query failed: ${response.status} ${response.statusText}`);
@@ -86,11 +138,14 @@ export class DnsService {
   private async hasARecord(domain: string): Promise<boolean> {
     try {
       // Check for A records
-      const aResponse = await fetch(`${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=A`, {
-        headers: {
-          'Accept': 'application/dns-json'
+      const aResponse = await this.fetchWithTimeout(
+        `${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=A`,
+        {
+          headers: {
+            'Accept': 'application/dns-json'
+          }
         }
-      });
+      );
       
       if (!aResponse.ok) {
         return false;
@@ -104,11 +159,14 @@ export class DnsService {
       }
       
       // If no A records, check for AAAA records
-      const aaaaResponse = await fetch(`${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=AAAA`, {
-        headers: {
-          'Accept': 'application/dns-json'
+      const aaaaResponse = await this.fetchWithTimeout(
+        `${this.dnsApiBase}?name=${encodeURIComponent(domain)}&type=AAAA`,
+        {
+          headers: {
+            'Accept': 'application/dns-json'
+          }
         }
-      });
+      );
       
       if (!aaaaResponse.ok) {
         return false;
