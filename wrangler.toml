@@ -28,7 +28,7 @@ tag = "v1"
 new_classes = ["VerifeiDO"]
 
 [[queues.producers]]
-queue = "verifier-jobs"
+queue = "verifei-jobs"
 binding = "VERIFICATION_QUEUE"
 
 [[queues.consumers]]
