@@ -33,7 +33,7 @@ interface VerifyEmailRequest {
  * Durable Object for email verification
  * One instance per domain to control concurrency and enable caching
  */
-export class VerifierDO {
+export class VerifeiDO {
   private state: DurableObjectState;
   private env: Env;
   private domainCache = new Map<string, DomainCache>();

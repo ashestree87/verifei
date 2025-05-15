@@ -1,5 +1,5 @@
 export interface Env {
-  VERIFIER: DurableObjectNamespace;
+  VERIFEI: DurableObjectNamespace;
   DB: D1Database;
   EMAIL_BLOCKLIST: KVNamespace;
   VERIFICATION_QUEUE: Queue<VerificationJob>;

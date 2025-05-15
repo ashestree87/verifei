@@ -1,7 +1,10 @@
 import { Router } from 'itty-router';
 import { CsvSplitter } from './utils/csvSplitter';
 import { Env, JobStatus, VerificationJob, VerificationResult } from './utils/types';
-import { VerifierDO } from './verifierDO';
+import { VerifeiDO } from './verifierDO';
+
+// Re-export the Durable Object class for Cloudflare
+export { VerifeiDO };
 
 // Interface for JSON input to verify a single email
 interface VerifyEmailRequest {
@@ -230,10 +233,10 @@ export default {
         }
         
         // Create an ID for the Durable Object based on the domain
-        const doId = env.VERIFIER.idFromName(domain);
+        const doId = env.VERIFEI.idFromName(domain);
         
         // Get the Durable Object stub
-        const doStub = env.VERIFIER.get(doId);
+        const doStub = env.VERIFEI.get(doId);
         
         // Forward the request to the Durable Object
         const response = await doStub.fetch(new Request('http://internal/verify', {
@@ -323,8 +326,8 @@ export default {
             }
             
             // Get the Durable Object for this domain
-            const doId = env.VERIFIER.idFromName(domain);
-            const doStub = env.VERIFIER.get(doId);
+            const doId = env.VERIFEI.idFromName(domain);
+            const doStub = env.VERIFEI.get(doId);
             
             // Verify the email
             const response = await doStub.fetch(new Request('http://internal/verify', {
