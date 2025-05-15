@@ -72,30 +72,63 @@ export class VerifeiDO {
     const url = new URL(request.url);
     const path = url.pathname;
     
+    console.log(`DO fetch request to path: ${path}`);
+    
     // Perform a cache cleanup on each request
     this.cleanCache();
     
     if (path === '/verify' && request.method === 'POST') {
-      const data = await request.json() as VerifyEmailRequest;
+      console.log('Processing /verify request in DO');
       
-      if (!data.email || typeof data.email !== 'string') {
-        return new Response('Email parameter is required', { status: 400 });
+      let email: string;
+      try {
+        const data = await request.json() as VerifyEmailRequest;
+        
+        if (!data.email || typeof data.email !== 'string') {
+          return new Response('Email parameter is required', { status: 400 });
+        }
+        
+        email = data.email;
+      } catch (error) {
+        console.error('Error parsing request body:', error);
+        return new Response('Invalid request body', { status: 400 });
       }
       
       try {
         // Check if we've reached the concurrency limit
         if (this.activeTasks >= this.maxConcurrentTasks) {
+          console.log(`Too many concurrent verifications (${this.activeTasks}/${this.maxConcurrentTasks})`);
           return new Response('Too many concurrent verifications', { status: 429 });
         }
         
-        // Verify the email
-        const result = await this.verify(data.email);
+        console.log(`Starting verification for: ${email}`);
+        
+        // Create a verification timeout
+        const verifyTimeoutPromise = new Promise<VerificationResult>((resolve) => {
+          setTimeout(() => {
+            console.log(`Internal timeout while verifying: ${email}`);
+            resolve({
+              email,
+              status: VerificationStatus.TIMEOUT,
+              score: 0,
+              reason: 'Internal verification timeout',
+              checkedAt: Date.now(),
+              ttl: 15 * 60 * 1000 // 15 minutes
+            });
+          }, 10000); // 10 second timeout
+        });
+        
+        // Verify the email with a timeout
+        const resultPromise = this.verify(email);
+        const result = await Promise.race([resultPromise, verifyTimeoutPromise]);
+        
+        console.log(`Completed verification for ${email} with status: ${result.status}`);
         
         return new Response(JSON.stringify(result), {
           headers: { 'Content-Type': 'application/json' }
         });
       } catch (error) {
-        console.error('Verification error:', error);
+        console.error(`Verification error for ${email || 'unknown email'}:`, error);
         return new Response(`Verification error: ${error instanceof Error ? error.message : String(error)}`, {
           status: 500
         });
@@ -344,8 +377,8 @@ export class VerifeiDO {
    */
   private async isDisposableDomain(domain: string): Promise<boolean> {
     try {
-      // Add timeout for KV operations (they should be fast, but just in case)
-      const kvTimeout = 5000; // 5 seconds
+      // Reduce timeout for KV operations to be very fast
+      const kvTimeout = 2000; // 2 seconds
       
       // Check if domain is directly in the blocklist
       const isBlockedPromise = this.env.EMAIL_BLOCKLIST.get(`blocklist/disposable/${domain}`);

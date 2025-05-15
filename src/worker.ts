@@ -1,6 +1,6 @@
 import { Router } from 'itty-router';
 import { CsvSplitter } from './utils/csvSplitter';
-import { Env, JobStatus, VerificationJob, VerificationResult } from './utils/types';
+import { Env, JobStatus, VerificationJob, VerificationResult, VerificationStatus } from './utils/types';
 import { VerifeiDO } from './verifierDO';
 
 // Re-export the Durable Object class for Cloudflare
@@ -146,6 +146,7 @@ export default {
       // Verify a single email
       router.post('/verify', async (request) => {
         try {
+          console.log('Starting /verify endpoint processing');
           const data = await request.json() as VerifyEmailRequest;
           
           if (!data || !data.email || typeof data.email !== 'string') {
@@ -156,6 +157,7 @@ export default {
           }
           
           const email = data.email.trim();
+          console.log(`Processing verification for email: ${email}`);
           const domain = email.split('@')[1];
           
           if (!domain) {
@@ -167,24 +169,58 @@ export default {
           
           // Create an ID for the Durable Object based on the domain
           const doId = env.VERIFEI.idFromName(domain);
+          console.log(`Created Durable Object ID for domain: ${domain}`);
           
           // Get the Durable Object stub
           const doStub = env.VERIFEI.get(doId);
           
           // Create a controller for the fetch request
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 30000); // 30 second timeout
+          // Reduce timeout to 15 seconds for faster feedback
+          const timeoutId = setTimeout(() => {
+            console.log(`Aborting verification for ${email} due to timeout`);
+            controller.abort();
+          }, 15000); 
           
           try {
+            console.log(`Sending verification request to DO for ${email}`);
+            
             // Forward the request to the Durable Object
-            const response = await doStub.fetch(new Request('http://internal/verify', {
+            const fetchPromise = doStub.fetch(new Request('http://internal/verify', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ email }),
               signal: controller.signal
             }));
             
+            // Create a second timeout Promise that resolves with a timeout response
+            const secondTimeoutPromise = new Promise<Response>((resolve) => {
+              setTimeout(() => {
+                console.log(`Secondary timeout for ${email}`);
+                resolve(new Response(JSON.stringify({
+                  email, 
+                  status: VerificationStatus.TIMEOUT, 
+                  score: 0, 
+                  reason: 'Secondary verification timeout',
+                  checkedAt: Date.now(),
+                  ttl: 15 * 60 * 1000
+                }), { 
+                  status: 504,
+                  headers: { 'Content-Type': 'application/json', ...corsHeaders }
+                }));
+              }, 12000); // Slightly shorter than the abort timeout
+            });
+            
+            // Race the fetch against the timeout
+            const response = await Promise.race([fetchPromise, secondTimeoutPromise]);
             clearTimeout(timeoutId);
+            
+            console.log(`Received response for ${email} with status: ${response.status}`);
+            
+            // If it's our timeout response, return it directly
+            if (response.status === 504) {
+              return response;
+            }
             
             // Add CORS headers to the response
             const responseInit = {
@@ -193,13 +229,25 @@ export default {
               headers: { ...Object.fromEntries(response.headers.entries()), ...corsHeaders }
             };
             
-            return new Response(await response.text(), responseInit);
+            const responseText = await response.text();
+            console.log(`Response body length: ${responseText.length} bytes`);
+            
+            return new Response(responseText, responseInit);
           } catch (error) {
             clearTimeout(timeoutId);
+            console.error(`Caught error in verification for ${email}:`, error);
+            
             if (error instanceof Error && error.name === 'AbortError') {
-              return new Response(`Verification timed out for ${email}`, { 
+              return new Response(JSON.stringify({
+                email, 
+                status: VerificationStatus.TIMEOUT, 
+                score: 0, 
+                reason: 'Verification timed out',
+                checkedAt: Date.now(),
+                ttl: 15 * 60 * 1000
+              }), { 
                 status: 504, // Gateway Timeout
-                headers: corsHeaders 
+                headers: { 'Content-Type': 'application/json', ...corsHeaders }
               });
             }
             throw error; // Re-throw for the outer catch

@@ -35,6 +35,8 @@ export class SmtpService {
    * @returns Promise with SMTP verification result
    */
   async verify(email: string, mxRecords: MXRecord[]): Promise<SmtpResult> {
+    console.log(`SMTP verify called for: ${email}`);
+    
     if (!email.includes('@') || mxRecords.length === 0) {
       return {
         success: false,
@@ -45,31 +47,56 @@ export class SmtpService {
     
     const domain = email.split('@')[1];
     
-    // Try each MX record in order of priority
-    for (const mx of mxRecords) {
-      try {
-        // Connect to the mail server
-        const result = await this.connectAndVerify(mx.exchange, email);
-        
-        // If successful or got a definitive negative response, return the result
-        if (result.success || (result.response && result.response.code >= 500)) {
-          return result;
-        }
-        
-        // If we got a temporary failure, try the next MX record
-        continue;
-      } catch (error) {
-        console.error(`Error connecting to ${mx.exchange}:`, error);
-        // Continue to the next MX record
-      }
-    }
+    // Create a fast timeout for the whole verification process
+    const fastVerifyTimeout = 8000; // 8 seconds max for the entire verification
+    const timeoutPromise = new Promise<SmtpResult>((resolve) => {
+      setTimeout(() => {
+        console.log(`SMTP verification timed out for: ${email}`);
+        resolve({
+          success: false,
+          isCatchAll: null,
+          error: 'SMTP verification timed out'
+        });
+      }, fastVerifyTimeout);
+    });
     
-    // If we've tried all MX records and none worked, return failure
-    return {
-      success: false,
-      isCatchAll: null,
-      error: `Failed to connect to any mail server for ${domain}`
-    };
+    // The main verification logic
+    const verifyPromise = (async () => {
+      // Try each MX record in order of priority
+      for (const mx of mxRecords) {
+        try {
+          console.log(`Trying mail server: ${mx.exchange} for ${email}`);
+          
+          // Use a shorter timeoutMs for verification
+          const originalTimeout = this.timeoutMs;
+          const shortTimeoutMs = Math.min(3000, this.timeoutMs); // Use at most 3 seconds per connection
+          
+          // Connect to the mail server with a shorter timeout
+          const result = await this.connectAndVerify(mx.exchange, email, shortTimeoutMs);
+          
+          // If successful or got a definitive negative response, return the result
+          if (result.success || (result.response && result.response.code >= 500)) {
+            return result;
+          }
+          
+          // If we got a temporary failure, try the next MX record
+          continue;
+        } catch (error) {
+          console.error(`Error connecting to ${mx.exchange} for ${email}:`, error);
+          // Continue to the next MX record
+        }
+      }
+      
+      // If we've tried all MX records and none worked, return failure
+      return {
+        success: false,
+        isCatchAll: null,
+        error: `Failed to connect to any mail server for ${domain}`
+      };
+    })();
+    
+    // Race the verification against the timeout
+    return Promise.race([verifyPromise, timeoutPromise]);
   }
   
   /**
@@ -98,12 +125,17 @@ export class SmtpService {
    * Connect to a mail server and perform SMTP handshake to verify an email
    * @param server - Mail server hostname
    * @param email - Email address to verify
+   * @param overrideTimeoutMs - Optional timeout override in milliseconds
    * @returns Promise with SMTP verification result
    */
-  private async connectAndVerify(server: string, email: string): Promise<SmtpResult> {
+  private async connectAndVerify(server: string, email: string, overrideTimeoutMs?: number): Promise<SmtpResult> {
     // Using Cloudflare Workers Sockets API
     let socket: any = null;
     let timeoutId: NodeJS.Timeout | null = null;
+    
+    // Use override timeout if provided
+    const connectionTimeoutMs = overrideTimeoutMs || this.timeoutMs;
+    console.log(`Connecting to ${server} with timeout ${connectionTimeoutMs}ms`);
     
     try {
       socket = new (globalThis as any).Socket({
@@ -122,7 +154,7 @@ export class SmtpService {
             // Ignore errors on close
           }
         }
-      }, this.timeoutMs);
+      }, connectionTimeoutMs);
       
       // Connect to the server
       const connected = await socket.connect();
@@ -229,14 +261,16 @@ export class SmtpService {
    * @returns Promise with parsed SMTP response
    */
   private async readResponse(socket: any): Promise<SmtpResponse> {
-    // Add a timeout to prevent hanging forever
+    // Add a timeout to prevent hanging forever - use even shorter timeout for reads
+    const readTimeoutMs = 2000; // 2 seconds is generous for an SMTP read
+    
     const readPromise = socket.read();
     
     // Create a timeout promise that rejects after the timeout period
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => {
         reject(new Error('Socket read timed out'));
-      }, this.timeoutMs);
+      }, readTimeoutMs);
     });
     
     // Race the read promise against the timeout
@@ -251,6 +285,7 @@ export class SmtpService {
     }
     
     const responseText = new TextDecoder().decode(buffer);
+    console.log(`SMTP response: ${responseText.trim()}`);
     
     // Parse the response code and message
     const match = responseText.match(/^(\d{3})([ -])(.*)/m);
