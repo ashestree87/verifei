@@ -12,12 +12,12 @@ GRAY_RETRY_AFTER_SEC = "3600"
 
 [[kv_namespaces]]
 binding = "EMAIL_BLOCKLIST"
-id = "your-kv-id-will-be-generated"
+id = "0e50c0b8663943dfac472d176bd52c9f"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "email_verifei"
-database_id = "your-d1-id-will-be-generated"
+database_id = "52655c6e-ba4d-4783-b0d7-b40b8dfaed15"
 
 [[durable_objects.bindings]]
 name = "VERIFEI"

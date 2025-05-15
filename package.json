@@ -6,10 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
+    "predeploy": "./predeploy.sh",
     "deploy": "wrangler deploy",
     "test": "vitest run",
     "test:watch": "vitest",
-    "setup": "wrangler d1 migrations apply && wrangler kv:namespace create EMAIL_BLOCKLIST && wrangler queues create verifier-jobs"
+    "setup": "wrangler d1 migrations apply && wrangler kv:namespace create EMAIL_BLOCKLIST && wrangler queues create verifei-jobs"
   },
   "keywords": [],
   "author": "",
