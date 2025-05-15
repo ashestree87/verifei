@@ -1,0 +1,41 @@
+name = "verifei"
+main = "src/worker.ts"
+compatibility_date = "2023-09-28"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+SMTP_HELO_DOMAIN = "example.com"
+PROBE_EMAIL = "probe@example.com"
+MAX_CONCURRENCY_PER_MX = "5"
+SMTP_TIMEOUT_MS = "5000"
+GRAY_RETRY_AFTER_SEC = "3600"
+
+[[kv_namespaces]]
+binding = "EMAIL_BLOCKLIST"
+id = "your-kv-id-will-be-generated"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "email_verifei"
+database_id = "your-d1-id-will-be-generated"
+
+[[durable_objects.bindings]]
+name = "VERIFEI"
+class_name = "VerifeiDO"
+
+[[migrations]]
+tag = "v1"
+new_classes = ["VerifeiDO"]
+
+[[queues.producers]]
+queue = "verifier-jobs"
+binding = "VERIFICATION_QUEUE"
+
+[[queues.consumers]]
+queue = "verifei-jobs"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 3
+
+[triggers]
+crons = ["0 0 * * *"] # Daily cron to sync blocklists from R2 to KV 
