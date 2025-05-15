@@ -31,7 +31,8 @@ export enum VerificationStatus {
   DELIVERABLE = 'deliverable',
   RISKY = 'risky',
   UNKNOWN = 'unknown',
-  UNDELIVERABLE = 'undeliverable'
+  UNDELIVERABLE = 'undeliverable',
+  TIMEOUT = 'timeout'
 }
 
 export interface MXRecord {

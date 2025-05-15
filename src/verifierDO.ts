@@ -135,112 +135,179 @@ export class VerifeiDO {
     try {
       this.activeTasks++;
       
-      // 1. Basic validation
-      if (!this.isValidEmailSyntax(email)) {
-        return this.scoreService.calculateScore(
-          email,
-          false, // syntax valid
-          false, // is disposable
-          false, // dns valid
-          null,  // is catch-all
-          false, // smtp valid
-          undefined // smtp response code
-        );
-      }
+      // Setup an abort controller for timeouts
+      const controller = new AbortController();
+      const signal = controller.signal;
       
-      // Extract the domain
-      const domain = email.split('@')[1].toLowerCase();
+      // Use a 25 second timeout to ensure we don't hit the worker limit
+      const timeoutId = setTimeout(() => {
+        controller.abort();
+      }, 25000);
       
-      // 2. Check if email is already cached
-      const cachedEmail = this.emailCache.get(email);
-      if (cachedEmail) {
-        return cachedEmail.result;
-      }
-      
-      // 3. Check if domain is disposable
-      const isDisposable = await this.isDisposableDomain(domain);
-      
-      // 4. Perform or retrieve cached DNS check
-      let dnsResult: DnsResult;
-      let isCatchAll: boolean | null = null;
-      
-      const cachedDomain = this.domainCache.get(domain);
-      if (cachedDomain) {
-        dnsResult = cachedDomain.dnsResult;
-        isCatchAll = cachedDomain.isCatchAll;
-      } else {
-        // Perform DNS lookup
-        dnsResult = await this.dnsService.lookup(domain);
+      try {
+        // 1. Basic validation
+        if (!this.isValidEmailSyntax(email)) {
+          const result = this.scoreService.calculateScore(
+            email,
+            false, // syntax valid
+            false, // is disposable
+            false, // dns valid
+            null,  // is catch-all
+            false, // smtp valid
+            undefined // smtp response code
+          );
+          
+          return result;
+        }
         
-        // Cache the DNS result
-        this.domainCache.set(domain, {
-          dnsResult,
-          isCatchAll: null, // We'll set this later if needed
-          bannerSeen: null,
-          timestamp: Date.now()
-        });
-      }
-      
-      // If no valid DNS records, return early
-      const dnsValid = dnsResult.hasMx || dnsResult.hasA;
-      if (!dnsValid) {
+        // Extract the domain
+        const domain = email.split('@')[1].toLowerCase();
+        
+        // 2. Check if email is already cached
+        const cachedEmail = this.emailCache.get(email);
+        if (cachedEmail) {
+          return cachedEmail.result;
+        }
+        
+        // 3. Check if domain is disposable - with abort signal
+        let isDisposable = false;
+        try {
+          isDisposable = await this.isDisposableDomain(domain);
+        } catch (error) {
+          if (signal.aborted) {
+            throw new Error('Operation timed out');
+          }
+          console.error(`Error checking if domain is disposable: ${error}`);
+        }
+        
+        // 4. Perform or retrieve cached DNS check
+        let dnsResult: DnsResult;
+        let isCatchAll: boolean | null = null;
+        
+        const cachedDomain = this.domainCache.get(domain);
+        if (cachedDomain) {
+          dnsResult = cachedDomain.dnsResult;
+          isCatchAll = cachedDomain.isCatchAll;
+        } else {
+          // Perform DNS lookup
+          dnsResult = await this.dnsService.lookup(domain);
+          
+          // Check if we've been aborted
+          if (signal.aborted) {
+            throw new Error('Operation timed out');
+          }
+          
+          // Cache the DNS result
+          this.domainCache.set(domain, {
+            dnsResult,
+            isCatchAll: null, // We'll set this later if needed
+            bannerSeen: null,
+            timestamp: Date.now()
+          });
+        }
+        
+        // If no valid DNS records, return early
+        const dnsValid = dnsResult.hasMx || dnsResult.hasA;
+        if (!dnsValid) {
+          const result = this.scoreService.calculateScore(
+            email,
+            true,  // syntax valid
+            isDisposable,
+            false, // dns valid
+            null,  // is catch-all
+            false, // smtp valid
+            undefined // smtp response code
+          );
+          
+          this.cacheEmailResult(email, result);
+          return result;
+        }
+        
+        // 5. Perform SMTP verification
+        let smtpResult;
+        
+        // If we have MX records, use them for SMTP check
+        if (dnsResult.hasMx && dnsResult.records.length > 0) {
+          // Check if we've been aborted before making SMTP calls
+          if (signal.aborted) {
+            throw new Error('Operation timed out');
+          }
+          
+          smtpResult = await this.smtpService.verify(email, dnsResult.records);
+          
+          // Check if we've been aborted
+          if (signal.aborted) {
+            throw new Error('Operation timed out');
+          }
+          
+          // 6. Test catch-all if necessary and not already cached
+          if (cachedDomain && cachedDomain.isCatchAll === null) {
+            try {
+              isCatchAll = await this.smtpService.testCatchAll(domain, dnsResult.records);
+              
+              // Check if we've been aborted
+              if (signal.aborted) {
+                throw new Error('Operation timed out');
+              }
+              
+              // Update the domain cache with catch-all info
+              this.domainCache.set(domain, {
+                ...cachedDomain,
+                isCatchAll,
+                timestamp: Date.now()
+              });
+            } catch (catchAllError) {
+              console.error(`Error testing catch-all for ${domain}:`, catchAllError);
+              // Continue without catch-all info
+            }
+          }
+        } else {
+          // No MX records, but the domain is valid - fall back to external service
+          // or mark as unknown
+          smtpResult = {
+            success: false,
+            isCatchAll: null,
+            error: 'Domain has no mail exchanger records'
+          };
+        }
+        
+        // 7. Score the result
         const result = this.scoreService.calculateScore(
           email,
           true,  // syntax valid
           isDisposable,
-          false, // dns valid
-          null,  // is catch-all
-          false, // smtp valid
-          undefined // smtp response code
+          dnsValid,
+          isCatchAll,
+          smtpResult.success,
+          smtpResult.response?.code
         );
         
+        // Cache the result
         this.cacheEmailResult(email, result);
-        return result;
-      }
-      
-      // 5. Perform SMTP verification
-      let smtpResult;
-      
-      // If we have MX records, use them for SMTP check
-      if (dnsResult.hasMx && dnsResult.records.length > 0) {
-        smtpResult = await this.smtpService.verify(email, dnsResult.records);
         
-        // 6. Test catch-all if necessary and not already cached
-        if (cachedDomain && cachedDomain.isCatchAll === null) {
-          isCatchAll = await this.smtpService.testCatchAll(domain, dnsResult.records);
+        return result;
+      } catch (error) {
+        // If we have an abort error, return a specific result
+        if (error instanceof Error && error.name === 'AbortError' || 
+            (error instanceof Error && error.message === 'Operation timed out')) {
+          console.error(`Verification timed out for ${email}`);
           
-          // Update the domain cache with catch-all info
-          this.domainCache.set(domain, {
-            ...cachedDomain,
-            isCatchAll,
-            timestamp: Date.now()
-          });
+          // Return a timeout-specific result
+          return {
+            email,
+            status: VerificationStatus.TIMEOUT,
+            score: 0,
+            reason: 'Verification timed out',
+            checkedAt: Date.now(),
+            ttl: 15 * 60 * 1000 // 15 minutes - shorter cache for timeouts
+          };
         }
-      } else {
-        // No MX records, but the domain is valid - fall back to external service
-        // or mark as unknown
-        smtpResult = {
-          success: false,
-          isCatchAll: null,
-          error: 'Domain has no mail exchanger records'
-        };
+        
+        // Re-throw other errors
+        throw error;
+      } finally {
+        clearTimeout(timeoutId);
       }
-      
-      // 7. Score the result
-      const result = this.scoreService.calculateScore(
-        email,
-        true,  // syntax valid
-        isDisposable,
-        dnsValid,
-        isCatchAll,
-        smtpResult.success,
-        smtpResult.response?.code
-      );
-      
-      // Cache the result
-      this.cacheEmailResult(email, result);
-      
-      return result;
     } finally {
       this.activeTasks--;
     }
@@ -277,8 +344,18 @@ export class VerifeiDO {
    */
   private async isDisposableDomain(domain: string): Promise<boolean> {
     try {
+      // Add timeout for KV operations (they should be fast, but just in case)
+      const kvTimeout = 5000; // 5 seconds
+      
       // Check if domain is directly in the blocklist
-      const isBlocked = await this.env.EMAIL_BLOCKLIST.get(`blocklist/disposable/${domain}`);
+      const isBlockedPromise = this.env.EMAIL_BLOCKLIST.get(`blocklist/disposable/${domain}`);
+      const timeoutPromise = new Promise<null>((_, reject) => {
+        setTimeout(() => reject(new Error('KV lookup timed out')), kvTimeout);
+      });
+      
+      // Race the KV lookup against the timeout
+      const isBlocked = await Promise.race([isBlockedPromise, timeoutPromise]) as string | null;
+      
       if (isBlocked) {
         return true;
       }
@@ -288,14 +365,25 @@ export class VerifeiDO {
       
       if (result.type === ParseResultType.Listed) {
         const rootDomain = `${result.domain}.${result.topLevelDomains.join('.')}`;
-        const isRootBlocked = await this.env.EMAIL_BLOCKLIST.get(`blocklist/disposable/${rootDomain}`);
+        
+        // Same timeout pattern for the root domain check
+        const isRootBlockedPromise = this.env.EMAIL_BLOCKLIST.get(`blocklist/disposable/${rootDomain}`);
+        const isRootBlocked = await Promise.race([isRootBlockedPromise, timeoutPromise]) as string | null;
+        
         return !!isRootBlocked;
       }
       
       return false;
     } catch (error) {
-      console.error('Error checking disposable domain:', error);
-      return false; // Assume not disposable if check fails
+      // Specific logging for timeout errors
+      if (error instanceof Error && error.message === 'KV lookup timed out') {
+        console.warn(`KV lookup timed out for domain: ${domain}`);
+      } else {
+        console.error('Error checking disposable domain:', error);
+      }
+      
+      // Assume not disposable if check fails, but allow the verification to continue
+      return false;
     }
   }
   

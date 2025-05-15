@@ -38,6 +38,21 @@ export default {
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     };
     
+    // First, handle simple requests without any potentially slow operations
+    const url = new URL(request.url);
+    
+    // Handle OPTIONS request for CORS immediately
+    if (request.method === 'OPTIONS') {
+      return new Response(null, { headers: corsHeaders });
+    }
+    
+    // Handle health checks immediately - no DB or complex operations
+    if (url.pathname === '/health') {
+      return new Response(JSON.stringify({ status: 'ok' }), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders }
+      });
+    }
+    
     // Create a promise that times out after 50 seconds (Cloudflare's max is 60s)
     const timeoutPromise = new Promise<Response>((_, reject) => {
       setTimeout(() => {
@@ -46,18 +61,8 @@ export default {
     });
     
     try {
-      // Set up the router
+      // Set up the router for more complex operations
       const router = Router();
-      
-      // Handle OPTIONS request for CORS
-      router.options('*', () => new Response(null, { headers: corsHeaders }));
-      
-      // Health check endpoint
-      router.get('/health', () => {
-        return new Response(JSON.stringify({ status: 'ok' }), {
-          headers: { 'Content-Type': 'application/json', ...corsHeaders }
-        });
-      });
       
       // Upload endpoint for CSV/JSON files
       router.post('/upload', async (request) => {
